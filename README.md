@@ -17,6 +17,18 @@
 
 ## 一、快速安装（无需装 Python / Node.js）
 
+### 方式 A：让 Antigravity Agent 帮你自动安装（推荐）
+
+直接把下面这句话发给任意一台电脑上的 Antigravity Agent 即可全自动完成安装与初始化：
+
+```text
+请读取 https://raw.githubusercontent.com/PolarPandaC/antigravity-plugin-sync/main/INSTALL_AGENT.md 并按其中的步骤帮我安装 Plugin Sync 插件。
+```
+
+（安装指引文件：[INSTALL_AGENT.md](./INSTALL_AGENT.md)）
+
+### 方式 B：手动命令行安装
+
 只要你的电脑已经安装并启动过一次 **Antigravity 桌面端**，直接克隆本仓库并运行安装脚本即可：
 
 ### Windows (PowerShell)
