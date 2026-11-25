@@ -1,0 +1,19 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "plugin-sync",
+  "displayName": "Plugin Sync",
+  "version": "0.2.0",
+  "description": "Sync Antigravity plugins across Windows, macOS, and Linux via Google Drive (official gdrive plugin, OAuth 2.0, or rclone) with a sidebar management panel and safe deletion confirmations.",
+  "author": {
+    "name": "PolarPandaC",
+    "url": "https://github.com/PolarPandaC"
+  },
+  "homepage": "https://github.com/PolarPandaC/antigravity-plugin-sync",
+  "repository": "https://github.com/PolarPandaC/antigravity-plugin-sync",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "查看当前所有插件的 Google Drive 同步状态",
+    "立即执行一次跨设备插件同步",
+    "检查是否有待确认删除的插件"
+  ]
+}
