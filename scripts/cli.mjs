@@ -11,6 +11,8 @@ function printUsage() {
 Commands:
   status [--json] [--refresh]            Show plugin sync status
   sync [--json]                          Run bidirectional plugin sync now
+  push <dir>                             Force push local plugin to Google Drive
+  pull <dir>                             Force pull remote plugin from Google Drive
   confirm-delete <dir> [--kind local|remote]
   restore <dir>                          Restore locally deleted plugin from Google Drive
   keep-local <dir>                       Keep local plugin and ignore remote deletion
@@ -80,13 +82,30 @@ export async function runCli(argv = process.argv.slice(2)) {
     if (isJson) {
       console.log(JSON.stringify(res, null, 2));
     } else if (res.ok) {
+      const divergedPart = res.diverged?.length ? `, diverged=${JSON.stringify(res.diverged)}` : '';
       console.log(
-        `Sync OK. uploaded=${JSON.stringify(res.uploaded)}, installed=${JSON.stringify(res.installed)}, updated=${JSON.stringify(res.updated)}, pending_deletions=${res.pendingDeletions.length}`,
+        `Sync OK. uploaded=${JSON.stringify(res.uploaded)}, installed=${JSON.stringify(res.installed)}, updated=${JSON.stringify(res.updated)}${divergedPart}, pending_deletions=${res.pendingDeletions.length}`,
       );
     } else {
       console.error(`Sync failed: ${res.error}`);
     }
     return res.ok ? 0 : 1;
+  }
+
+  if (cmd === 'push') {
+    const dirName = rest[1];
+    if (!dirName) throw new Error('Missing plugin directory name');
+    await engine.pushLocalPlugin(dirName);
+    console.log(`Pushed local plugin ${dirName} to Google Drive`);
+    return 0;
+  }
+
+  if (cmd === 'pull') {
+    const dirName = rest[1];
+    if (!dirName) throw new Error('Missing plugin directory name');
+    await engine.pullRemotePlugin(dirName);
+    console.log(`Pulled remote plugin ${dirName} from Google Drive`);
+    return 0;
   }
 
   if (cmd === 'confirm-delete') {

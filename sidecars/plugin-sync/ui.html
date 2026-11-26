@@ -249,6 +249,13 @@
 
       <div class="sep"></div>
       <label class="field">
+        <span>双端共有插件策略</span>
+        <select id="existingPluginPolicySelect">
+          <option value="keep_local">仅补齐缺失，共有插件保持不动（推荐，避免 Windows 占用报错）</option>
+          <option value="auto_overwrite">按哈希自动双向覆盖（旧模式）</option>
+        </select>
+      </label>
+      <label class="field">
         <span>Google Drive 同步文件夹名称</span>
         <input id="folderNameInput" type="text" placeholder="AntigravityPluginSync" />
       </label>
@@ -280,6 +287,7 @@
       <div class="tabs" id="filterTabs">
         <button class="tab active" data-filter="all">全部</button>
         <button class="tab" data-filter="synced">已同步</button>
+        <button class="tab" data-filter="diff">有差异</button>
         <button class="tab" data-filter="pending">待确认</button>
         <button class="tab" data-filter="excluded">已排除</button>
         <button class="tab" data-filter="builtin">内置</button>
@@ -327,7 +335,7 @@
           case 'synced': return { text: '已同步', cls: 'synced' };
           case 'local_deleted': return { text: '本机已删除·待确认', cls: 'warn' };
           case 'remote_deleted': return { text: '他端已删除·待确认', cls: 'warn' };
-          case 'out_of_sync': return { text: '待同步更新', cls: 'info' };
+          case 'out_of_sync': return { text: '双端有差异', cls: 'warn' };
           case 'local_only': return { text: '仅本机·待上传', cls: 'info' };
           case 'remote_only': return { text: '仅云端·待安装', cls: 'info' };
           case 'excluded': return { text: '已排除同步', cls: '' };
@@ -418,6 +426,7 @@
         const query = (el('searchInput').value || '').trim().toLowerCase();
         const filtered = plugins.filter((item) => {
           if (currentFilter === 'synced' && item.syncStatus !== 'synced') return false;
+          if (currentFilter === 'diff' && !item.hasDiff) return false;
           if (currentFilter === 'pending' && !item.pendingDeletion) return false;
           if (currentFilter === 'excluded' && !item.excluded) return false;
           if (currentFilter === 'builtin' && !item.isBuiltin) return false;
@@ -472,9 +481,29 @@
             card.appendChild(desc);
           }
 
+          if (item.hasDiff) {
+            const diffHint = document.createElement('div');
+            diffHint.className = 'muted';
+            diffHint.textContent = '本地 v' + (item.localVersion || '-') + ' / 云端 v' + (item.remoteVersion || '-') + ' 内容存在差异';
+            card.appendChild(diffHint);
+          }
+
           if (!item.isSelf && !item.isBuiltin && !item.pendingDeletion) {
             const actions = document.createElement('div');
             actions.className = 'row-wrap';
+            if (item.hasDiff && !item.excluded) {
+              const pushBtn = document.createElement('button');
+              pushBtn.className = 'secondary sm';
+              pushBtn.textContent = '推送覆盖云端';
+              pushBtn.onclick = () => postAction('/api/plugins/push', { dirName: item.dirName }, '已推送本机版本覆盖云端');
+
+              const pullBtn = document.createElement('button');
+              pullBtn.className = 'secondary sm';
+              pullBtn.textContent = '拉取云端更新';
+              pullBtn.onclick = () => postAction('/api/plugins/pull', { dirName: item.dirName }, '已从云端拉取更新');
+
+              actions.append(pushBtn, pullBtn);
+            }
             const toggleBtn = document.createElement('button');
             toggleBtn.className = 'secondary sm';
             toggleBtn.textContent = item.excluded ? '加入同步' : '排除同步';
@@ -516,6 +545,7 @@
 
         el('rcloneRemoteInput').value = (s.rclone && s.rclone.remote) || '';
         el('rcloneBinaryInput').value = (s.rclone && s.rclone.binary) || 'rclone';
+        el('existingPluginPolicySelect').value = s.existingPluginPolicy || 'keep_local';
         el('folderNameInput').value = s.folderName || 'AntigravityPluginSync';
         el('pollIntervalInput').value = String(s.pollIntervalSec || 60);
         el('autoSyncCheck').checked = s.autoSyncOnStartup !== false;
@@ -582,7 +612,8 @@
           if (data.snapshot) applySnapshot(data.snapshot, false);
           if (data.sync && data.sync.ok) {
             const s = data.sync;
-            showToast('同步完成：上传 ' + s.uploaded.length + '，新安装 ' + s.installed.length + '，更新 ' + s.updated.length);
+            const diffText = (s.diverged && s.diverged.length > 0) ? '，保持差异 ' + s.diverged.length : '';
+            showToast('同步完成：上传 ' + s.uploaded.length + '，新安装 ' + s.installed.length + '，更新 ' + s.updated.length + diffText);
           } else {
             showToast('同步未完成：' + ((data.sync && data.sync.error) || data.error || '未知错误'));
           }
@@ -620,6 +651,7 @@
       function buildSettingsPatch() {
         const patch = {
           backend: el('backendSelect').value,
+          existingPluginPolicy: el('existingPluginPolicySelect').value,
           folderName: el('folderNameInput').value.trim() || 'AntigravityPluginSync',
           pollIntervalSec: Number(el('pollIntervalInput').value || 60),
           autoSyncOnStartup: el('autoSyncCheck').checked,

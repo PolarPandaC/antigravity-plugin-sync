@@ -255,6 +255,18 @@ export class SidecarApp {
             return;
           }
 
+          if (url.pathname === '/api/plugins/push') {
+            const snapshot = await this.engine.pushLocalPlugin(String(body.dirName || ''));
+            this.#sendJson(res, 200, { ok: true, snapshot });
+            return;
+          }
+
+          if (url.pathname === '/api/plugins/pull') {
+            const snapshot = await this.engine.pullRemotePlugin(String(body.dirName || ''));
+            this.#sendJson(res, 200, { ok: true, snapshot });
+            return;
+          }
+
           if (url.pathname === '/api/settings') {
             this.engine.configStore.updateSettings(body);
             this.engine.invalidateAuthCache();

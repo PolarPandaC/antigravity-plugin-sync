@@ -145,7 +145,7 @@ test('end-to-end multi-device sync, updates, and deletion confirmations', async 
       const pluginsDir = join(home, '.gemini', 'config', 'plugins');
       mkdirSync(pluginsDir, { recursive: true });
       const store = new ConfigStore(join(home, 'data'));
-      store.updateSettings({ backend: 'oauth', deviceName: name });
+      store.updateSettings({ backend: 'oauth', deviceName: name, existingPluginPolicy: 'auto_overwrite' });
       return new SyncEngine({
         configStore: store,
         pluginsDir,
@@ -226,6 +226,93 @@ test('end-to-end multi-device sync, updates, and deletion confirmations', async 
     assert.ok(!existsSync(join(devB.pluginsDir, 'q')));
     assert.equal(snapBDel.pendingDeletions.length, 0);
     assert.equal(readdirSync(devB.configStore.trashDir).length, 1);
+  });
+});
+
+test('keep_local default preserves diverged plugins, supports manual push/pull, and isolates per-plugin errors', async () => {
+  await withTempDir(async (tmp) => {
+    const cloud = new InMemoryDriveBackend();
+    const makeDevice = (name) => {
+      const home = join(tmp, name);
+      const pluginsDir = join(home, '.gemini', 'config', 'plugins');
+      mkdirSync(pluginsDir, { recursive: true });
+      const store = new ConfigStore(join(home, 'data'));
+      assert.equal(store.getSettings().existingPluginPolicy, 'keep_local');
+      store.updateSettings({ backend: 'oauth', deviceName: name });
+      return new SyncEngine({
+        configStore: store,
+        pluginsDir,
+        backendFactory: () => cloud,
+        lsQueryFn: async () => [],
+        selfDirName: 'plugin-sync',
+      });
+    };
+
+    const devA = makeDevice('device-a');
+    const devB = makeDevice('device-b');
+
+    writePlugin(devA.pluginsDir, 'q', '1.0.0');
+    assert.deepEqual((await devA.syncNow()).uploaded, ['q']);
+    assert.deepEqual((await devB.syncNow()).installed, ['q']);
+
+    // Diverge on A: keep_local leaves cloud at 1.0.0 and surfaces hasDiff
+    writePlugin(devA.pluginsDir, 'q', '1.1.0');
+    const resA2 = await devA.syncNow();
+    assert.equal(resA2.ok, true);
+    assert.deepEqual(resA2.updated, []);
+    assert.deepEqual(resA2.diverged, ['q']);
+    assert.equal((await cloud.readManifest()).plugins.q.version, '1.0.0');
+
+    const diffItemA = (await devA.getSnapshot()).plugins.find((p) => p.dirName === 'q');
+    assert.equal(diffItemA.hasDiff, true);
+    assert.equal(diffItemA.localVersion, '1.1.0');
+    assert.equal(diffItemA.remoteVersion, '1.0.0');
+
+    // Manual push updates cloud and clears diff on A
+    const snapAfterPush = await devA.pushLocalPlugin('q');
+    const pushedItemA = snapAfterPush.plugins.find((p) => p.dirName === 'q');
+    assert.equal(pushedItemA.hasDiff, false);
+    assert.equal(pushedItemA.syncStatus, 'synced');
+    assert.equal((await cloud.readManifest()).plugins.q.version, '1.1.0');
+
+    // Sync on B keeps local 1.0.0 untouched
+    const resB2 = await devB.syncNow();
+    assert.equal(resB2.ok, true);
+    assert.deepEqual(resB2.updated, []);
+    assert.deepEqual(resB2.diverged, ['q']);
+    assert.equal(readPluginManifest(join(devB.pluginsDir, 'q')).version, '1.0.0');
+
+    // Manual pull updates B to 1.1.0 and clears diff
+    const snapAfterPull = await devB.pullRemotePlugin('q');
+    const pulledItemB = snapAfterPull.plugins.find((p) => p.dirName === 'q');
+    assert.equal(pulledItemB.hasDiff, false);
+    assert.equal(pulledItemB.syncStatus, 'synced');
+    assert.equal(readPluginManifest(join(devB.pluginsDir, 'q')).version, '1.1.0');
+
+    // Per-plugin error isolation: broken remote plugin doesn't block uploading good plugin
+    const manifest = await cloud.readManifest();
+    manifest.plugins.broken = {
+      dirName: 'broken',
+      name: 'broken',
+      displayName: 'broken',
+      version: '1.0.0',
+      description: '',
+      contentHash: 'deadbeef',
+      archiveName: 'broken--deadbeef.zip',
+      updatedAt: '2026-11-26T00:00:00Z',
+      updatedByDevice: 'other',
+      updatedByDeviceId: 'other-id',
+      deleted: false,
+    };
+    await cloud.writeManifest(manifest);
+    writePlugin(devB.pluginsDir, 'good', '1.0.0');
+
+    const resErr = await devB.syncNow();
+    assert.equal(resErr.ok, false);
+    assert.equal(resErr.errors.length, 1);
+    assert.equal(resErr.errors[0].dirName, 'broken');
+    assert.deepEqual(resErr.uploaded, ['good']);
+    assert.ok((await cloud.readManifest()).plugins.good);
   });
 });
 
