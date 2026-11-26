@@ -11,6 +11,7 @@ import { ConfigStore } from '../lib/config-store.mjs';
 import { GdriveCliBackend, GoogleDriveOAuthBackend, RcloneDriveBackend } from '../lib/drive-backend.mjs';
 import { computePluginHash, readPluginManifest, scanLocalPlugins } from '../lib/plugins-scanner.mjs';
 import { SyncEngine } from '../lib/sync-engine.mjs';
+import { applyUpdateFromZipBuffer, checkForUpdate, compareSemver, parseSemver } from '../lib/updater.mjs';
 import { createZipBuffer, readZipBuffer } from '../lib/zip.mjs';
 import { installPlugin } from '../scripts/install.mjs';
 import { uninstallPlugin } from '../scripts/uninstall.mjs';
@@ -793,5 +794,129 @@ test('GdriveCliBackend retries transient EOF/403 rateLimitExceeded and formats e
     });
     await assert.rejects(() => backendFail.readManifest(), /Google Drive API 配额限流 \(403 rateLimitExceeded\)/);
     assert.equal(failAttempts, 3);
+  });
+});
+
+test('updater parses semver, checks GitHub Releases with main fallback, and applies zip updates safely', async () => {
+  assert.deepEqual(parseSemver('v0.3.0-beta.1'), {
+    major: 0,
+    minor: 3,
+    patch: 0,
+    prerelease: ['beta', '1'],
+  });
+  assert.equal(compareSemver('0.3.0', '0.2.0'), 1);
+  assert.equal(compareSemver('v0.3.0', '0.3.0'), 0);
+  assert.equal(compareSemver('0.3.0', '0.3.0-beta.1'), 1);
+  assert.equal(compareSemver('0.2.9', '0.3.0'), -1);
+
+  const releaseRes = await checkForUpdate({
+    currentVersion: '0.2.0',
+    fetchFn: async (url) => {
+      assert.match(url, /api\.github\.com\/repos\/PolarPandaC\/antigravity-plugin-sync\/releases\/latest/);
+      return new Response(
+        JSON.stringify({
+          tag_name: 'v0.3.0',
+          html_url: 'https://github.com/PolarPandaC/antigravity-plugin-sync/releases/tag/v0.3.0',
+          body: '- Added check for updates\n- Fixed quota backoff',
+          published_at: '2026-11-26T08:00:00Z',
+          zipball_url: 'https://api.github.com/repos/PolarPandaC/antigravity-plugin-sync/zipball/v0.3.0',
+        }),
+        { status: 200 },
+      );
+    },
+  });
+  assert.equal(releaseRes.hasUpdate, true);
+  assert.equal(releaseRes.source, 'github_release');
+  assert.equal(releaseRes.latestVersion, '0.3.0');
+  assert.match(releaseRes.releaseNotes, /Added check for updates/);
+
+  const fallbackRes = await checkForUpdate({
+    currentVersion: '0.2.0',
+    fetchFn: async (url) => {
+      if (url.includes('api.github.com')) {
+        return new Response('Not Found', { status: 404 });
+      }
+      assert.match(url, /raw\.githubusercontent\.com\/PolarPandaC\/antigravity-plugin-sync\/main\/plugin\.json/);
+      return new Response(JSON.stringify({ name: 'plugin-sync', version: '0.3.1' }), { status: 200 });
+    },
+  });
+  assert.equal(fallbackRes.hasUpdate, true);
+  assert.equal(fallbackRes.source, 'github_main');
+  assert.equal(fallbackRes.latestVersion, '0.3.1');
+  assert.match(fallbackRes.zipUrl, /archive\/refs\/heads\/main\.zip$/);
+
+  await withTempDir(async (tmp) => {
+    const evilZip = createZipBuffer([{ name: '../../evil.txt', data: Buffer.from('bad') }]);
+    assert.throws(() => applyUpdateFromZipBuffer({ zipBuffer: evilZip, homeDir: tmp }), /Zip Slip/);
+
+    const prefix = 'PolarPandaC-antigravity-plugin-sync-abc123/';
+    const validZip = createZipBuffer([
+      { name: `${prefix}plugin.json`, data: Buffer.from(JSON.stringify({ name: 'plugin-sync', version: '0.3.0' })) },
+      { name: `${prefix}package.json`, data: Buffer.from(JSON.stringify({ name: 'plugin-sync', version: '0.3.0' })) },
+      { name: `${prefix}sidecars/plugin-sync/main.mjs`, data: Buffer.from('// upgraded\n') },
+    ]);
+    const applied = applyUpdateFromZipBuffer({ zipBuffer: validZip, homeDir: tmp });
+    assert.equal(applied.ok, true);
+    assert.equal(applied.installedVersion, '0.3.0');
+    assert.equal(applied.requiresRestart, true);
+    assert.ok(existsSync(join(tmp, '.gemini', 'config', 'plugins', 'plugin-sync', 'sidecars', 'plugin-sync', 'main.mjs')));
+  });
+});
+
+test('SidecarApp exposes /api/update/check and /api/update/apply endpoints', async () => {
+  await withTempDir(async (tmp) => {
+    const cloud = new InMemoryDriveBackend();
+    const pluginsDir = join(tmp, 'plugins');
+    mkdirSync(pluginsDir, { recursive: true });
+    const store = new ConfigStore(join(tmp, 'data'));
+    const engine = new SyncEngine({
+      configStore: store,
+      pluginsDir,
+      backendFactory: () => cloud,
+      lsQueryFn: async () => [],
+    });
+
+    const app = new SidecarApp({
+      engine,
+      token: 'upd-tok',
+      port: 0,
+      startBackground: false,
+      homeDir: tmp,
+      pluginRoot: REPO_ROOT,
+      updateChecker: async ({ currentVersion }) => ({
+        ok: true,
+        checkedAt: '2026-11-26T08:00:00Z',
+        currentVersion,
+        latestVersion: '0.4.0',
+        hasUpdate: true,
+        source: 'github_release',
+        releaseUrl: 'https://github.com/PolarPandaC/antigravity-plugin-sync/releases/tag/v0.4.0',
+        releaseNotes: 'Release 0.4.0',
+        zipUrl: 'https://github.com/PolarPandaC/antigravity-plugin-sync/archive/refs/tags/v0.4.0.zip',
+      }),
+      updateApplier: async ({ zipUrl }) => {
+        assert.match(zipUrl, /v0\.4\.0\.zip$/);
+        return { ok: true, targetDir: pluginsDir, installedVersion: '0.4.0', requiresRestart: true };
+      },
+    });
+
+    const port = await app.start();
+    try {
+      const base = `http://127.0.0.1:${port}`;
+      const headers = { 'X-Sidecar-Token': 'upd-tok', 'Content-Type': 'application/json' };
+
+      const checkResp = await (await fetch(`${base}/api/update/check`, { method: 'POST', headers, body: '{}' })).json();
+      assert.equal(checkResp.ok, true);
+      assert.equal(checkResp.update.hasUpdate, true);
+      assert.equal(checkResp.update.latestVersion, '0.4.0');
+
+      const applyResp = await (await fetch(`${base}/api/update/apply`, { method: 'POST', headers, body: '{}' })).json();
+      assert.equal(applyResp.ok, true);
+      assert.equal(applyResp.result.installedVersion, '0.4.0');
+      assert.equal(applyResp.update.requiresRestart, true);
+      assert.equal(applyResp.update.hasUpdate, false);
+    } finally {
+      await app.stop();
+    }
   });
 });

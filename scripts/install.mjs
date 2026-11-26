@@ -34,6 +34,13 @@ function cleanStaleFiles(targetDir) {
   }
 }
 
+function cleanupStageDir(stageDir) {
+  if (!existsSync(stageDir)) return;
+  try {
+    rmSync(stageDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 80 });
+  } catch {}
+}
+
 /** Install plugin-sync into `<homeDir>/.gemini/config/plugins/plugin-sync`. */
 export function installPlugin({ sourceRoot, homeDir, enableSidecar = false }) {
   const pluginsDir = join(homeDir, '.gemini', 'config', 'plugins');
@@ -41,7 +48,7 @@ export function installPlugin({ sourceRoot, homeDir, enableSidecar = false }) {
   const targetDir = join(pluginsDir, PLUGIN_NAME);
   const stageDir = join(pluginsDir, `.install-tmp-${PLUGIN_NAME}`);
 
-  if (existsSync(stageDir)) rmSync(stageDir, { recursive: true, force: true });
+  cleanupStageDir(stageDir);
   mkdirSync(stageDir, { recursive: true });
 
   try {
@@ -63,7 +70,7 @@ export function installPlugin({ sourceRoot, homeDir, enableSidecar = false }) {
       } catch {
         // On Windows, running sidecar holds CWD lock on sidecars/plugin-sync; copy in-place cleanly.
         cpSync(stageDir, targetDir, { recursive: true, force: true });
-        rmSync(stageDir, { recursive: true, force: true });
+        cleanupStageDir(stageDir);
       }
       cleanStaleFiles(targetDir);
     } else {
@@ -71,11 +78,11 @@ export function installPlugin({ sourceRoot, homeDir, enableSidecar = false }) {
         renameSync(stageDir, targetDir);
       } catch {
         cpSync(stageDir, targetDir, { recursive: true, force: true });
-        rmSync(stageDir, { recursive: true, force: true });
+        cleanupStageDir(stageDir);
       }
     }
   } catch (err) {
-    rmSync(stageDir, { recursive: true, force: true });
+    cleanupStageDir(stageDir);
     throw err;
   }
 

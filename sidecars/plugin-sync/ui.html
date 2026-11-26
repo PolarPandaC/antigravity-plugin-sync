@@ -137,6 +137,22 @@
       background: rgba(37, 99, 235, 0.14);
       color: var(--foreground, #1f2328);
     }
+    .update-card {
+      border: 1px solid rgba(37, 99, 235, 0.45);
+      background: rgba(37, 99, 235, 0.08);
+      border-radius: 10px;
+      padding: 12px;
+    }
+    .update-notes {
+      max-height: 120px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      font-size: 11.5px;
+      line-height: 1.5;
+      padding: 7px 9px;
+      border-radius: 7px;
+      background: rgba(127, 127, 127, 0.08);
+    }
     details summary { cursor: pointer; font-size: 11.5px; font-weight: 500; }
     .sep { height: 1px; background: var(--border, rgba(127, 127, 127, 0.2)); margin: 4px 0; }
   </style>
@@ -152,6 +168,7 @@
         </div>
         <div class="row-wrap">
           <button id="syncBtn">立即同步</button>
+          <button id="checkUpdateBtn" class="secondary">检查更新</button>
           <button id="toggleSettingsBtn" class="secondary">设置</button>
         </div>
       </div>
@@ -161,6 +178,22 @@
       </div>
       <div id="syncErrorBox" class="pill err" hidden></div>
       <div id="toastBox" class="toast" hidden></div>
+    </div>
+
+    <!-- Update Notification Card -->
+    <div id="updateSection" class="update-card stack" hidden>
+      <div class="row">
+        <div class="row-wrap">
+          <strong id="updateTitle">发现新版本</strong>
+          <span id="updateVersionPill" class="pill info"></span>
+        </div>
+        <span id="updateSourcePill" class="pill"></span>
+      </div>
+      <div id="updateNotes" class="update-notes" hidden></div>
+      <div class="row-wrap">
+        <button id="applyUpdateBtn" type="button">一键原地更新</button>
+        <a id="openReleaseLink" href="#" target="_blank" rel="noopener" style="font-size:11.5px;color:inherit">前往 GitHub 查看</a>
+      </div>
     </div>
 
     <!-- Pending Deletions Alert -->
@@ -560,12 +593,47 @@
         el('rcloneBox').hidden = val !== 'rclone';
       }
 
+      function renderUpdate(updateInfo) {
+        const sec = el('updateSection');
+        if (!updateInfo || (!updateInfo.hasUpdate && !updateInfo.requiresRestart)) {
+          sec.hidden = true;
+          return;
+        }
+        sec.hidden = false;
+        const applyBtn = el('applyUpdateBtn');
+        const notesEl = el('updateNotes');
+        const linkEl = el('openReleaseLink');
+
+        if (updateInfo.requiresRestart) {
+          el('updateTitle').textContent = '更新已就绪';
+          el('updateVersionPill').textContent = 'v' + (updateInfo.appliedVersion || updateInfo.latestVersion || '-');
+          el('updateSourcePill').textContent = '请重启生效';
+          notesEl.textContent = '已升级到 v' + (updateInfo.appliedVersion || updateInfo.latestVersion) + '，请重启 Antigravity 桌面端加载新版本。';
+          notesEl.hidden = false;
+          applyBtn.hidden = true;
+        } else {
+          el('updateTitle').textContent = '发现新版本';
+          el('updateVersionPill').textContent = 'v' + (updateInfo.currentVersion || '-') + ' → v' + (updateInfo.latestVersion || '-');
+          el('updateSourcePill').textContent = updateInfo.source === 'github_release' ? 'GitHub Release' : 'main 分支';
+          if (updateInfo.releaseNotes) {
+            notesEl.textContent = updateInfo.releaseNotes;
+            notesEl.hidden = false;
+          } else {
+            notesEl.hidden = true;
+          }
+          applyBtn.hidden = false;
+          applyBtn.disabled = false;
+          applyBtn.textContent = '一键原地更新';
+        }
+        linkEl.href = updateInfo.releaseUrl || 'https://github.com/PolarPandaC/antigravity-plugin-sync';
+      }
+
       function applySnapshot(snap, syncSettingsForm) {
         currentSnapshot = snap;
         const dot = el('connDot');
         dot.className = 'dot ' + (snap.lastSyncStatus === 'error' ? 'err' : (snap.connected ? 'ok' : ''));
         el('accountLabel').textContent = snap.accountLabel || '未配置';
-        el('deviceInfo').textContent = '设备: ' + (snap.deviceName || '-');
+        el('deviceInfo').textContent = '设备: ' + (snap.deviceName || '-') + (snap.pluginVersion ? ' · v' + snap.pluginVersion : '');
         el('lastSyncInfo').textContent = '上次同步: ' + formatTime(snap.lastSyncAt);
 
         const errBox = el('syncErrorBox');
@@ -576,6 +644,7 @@
           errBox.hidden = true;
         }
 
+        renderUpdate(snap.updateInfo || null);
         renderPending(snap.pendingDeletions || []);
         renderPlugins(snap.plugins || []);
         renderLogs(snap.activityLog || []);
@@ -620,6 +689,53 @@
         } finally {
           btn.disabled = false;
           btn.textContent = '立即同步';
+        }
+      };
+
+      el('checkUpdateBtn').onclick = async () => {
+        const btn = el('checkUpdateBtn');
+        btn.disabled = true;
+        btn.textContent = '检查中…';
+        try {
+          const res = await apiFetch('/api/update/check', { method: 'POST', body: '{}' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            showToast('检查更新失败: ' + (data.error || res.statusText));
+            return;
+          }
+          const u = data.update;
+          renderUpdate(u);
+          if (u && u.hasUpdate) {
+            showToast('发现新版本 v' + u.latestVersion + '，可点击「一键原地更新」');
+          } else {
+            showToast('当前已是最新版本 v' + ((u && u.currentVersion) || '-'));
+          }
+        } finally {
+          btn.disabled = false;
+          btn.textContent = '检查更新';
+        }
+      };
+
+      el('applyUpdateBtn').onclick = async () => {
+        const btn = el('applyUpdateBtn');
+        btn.disabled = true;
+        btn.textContent = '更新中…';
+        try {
+          const res = await apiFetch('/api/update/apply', { method: 'POST', body: '{}' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) {
+            showToast('更新失败: ' + (data.error || res.statusText));
+            btn.disabled = false;
+            btn.textContent = '一键原地更新';
+            return;
+          }
+          renderUpdate(data.update);
+          const ver = (data.result && data.result.installedVersion) || (data.update && data.update.appliedVersion) || '';
+          showToast('已升级到 v' + ver + '，请重启 Antigravity 桌面端生效！');
+        } catch (err) {
+          showToast('更新失败: ' + (err.message || err));
+          btn.disabled = false;
+          btn.textContent = '一键原地更新';
         }
       };
 

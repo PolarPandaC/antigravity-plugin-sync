@@ -1,9 +1,12 @@
-import { resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ConfigStore } from '../lib/config-store.mjs';
 import { buildBackend, listRcloneRemotes, OAuthFlowManager } from '../lib/drive-backend.mjs';
 import { getDataDir, getHomeDir, getPluginsDir } from '../lib/paths.mjs';
 import { SyncEngine } from '../lib/sync-engine.mjs';
+import { checkForUpdate, downloadAndApplyUpdate, getInstalledVersion } from '../lib/updater.mjs';
+
+const PLUGIN_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 function printUsage() {
   console.log(`Usage: node scripts/cli.mjs [--home <dir>] [--data-dir <dir>] <command> [options]
@@ -19,7 +22,9 @@ Commands:
   reupload <dir>                         Re-upload local plugin deleted remotely
   test-connection                        Test configured Google Drive backend
   list-rclone-remotes                    List detected rclone remotes
-  auth-oauth [--no-browser]              Start Google Drive OAuth 2.0 browser sign-in`);
+  auth-oauth [--no-browser]              Start Google Drive OAuth 2.0 browser sign-in
+  check-update [--json]                  Check GitHub for a newer plugin-sync version
+  self-update                            Download and apply the latest plugin-sync update`);
 }
 
 function parseGlobalFlags(argv) {
@@ -158,6 +163,30 @@ export async function runCli(argv = process.argv.slice(2)) {
   if (cmd === 'list-rclone-remotes') {
     const binary = store.getSettings().rclone?.binary || 'rclone';
     console.log(JSON.stringify(listRcloneRemotes(binary), null, 2));
+    return 0;
+  }
+
+  if (cmd === 'check-update') {
+    const isJson = rest.includes('--json');
+    const info = await checkForUpdate({ currentVersion: getInstalledVersion(PLUGIN_ROOT) });
+    if (isJson) {
+      console.log(JSON.stringify(info, null, 2));
+    } else if (info.hasUpdate) {
+      console.log(`Update available: v${info.currentVersion} -> v${info.latestVersion} (${info.source})\n${info.releaseUrl}`);
+    } else {
+      console.log(`Already up to date: v${info.currentVersion} (latest: v${info.latestVersion}, source: ${info.source})`);
+    }
+    return 0;
+  }
+
+  if (cmd === 'self-update') {
+    const info = await checkForUpdate({ currentVersion: getInstalledVersion(PLUGIN_ROOT) });
+    if (!info.hasUpdate) {
+      console.log(`Already up to date: v${info.currentVersion}`);
+      return 0;
+    }
+    const res = await downloadAndApplyUpdate({ zipUrl: info.zipUrl, homeDir: resolvedHome });
+    console.log(`Updated plugin-sync to v${res.installedVersion}. Please restart Antigravity Desktop App.`);
     return 0;
   }
 

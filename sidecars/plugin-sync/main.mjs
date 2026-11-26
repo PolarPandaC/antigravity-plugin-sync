@@ -11,8 +11,10 @@ import {
 } from '../../lib/drive-backend.mjs';
 import { getDataDir, getHomeDir, getPluginsDir, getPreloadJsPath } from '../../lib/paths.mjs';
 import { SyncEngine } from '../../lib/sync-engine.mjs';
+import { checkForUpdate, downloadAndApplyUpdate, getInstalledVersion } from '../../lib/updater.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const PLUGIN_ROOT = resolve(__dirname, '..', '..');
 
 const FALLBACK_PRELOAD_JS = `(function(){
   const params = new URLSearchParams(window.location.search);
@@ -60,10 +62,24 @@ function readJsonBody(req, maxBytes = 2 * 1024 * 1024) {
 
 /** Hosts the local HTTP API, Web UI, OAuth managers, and background sync loop. */
 export class SidecarApp {
-  constructor({ engine, token = '', port = 0, oauthManagerFactory, startBackground = true }) {
+  constructor({
+    engine,
+    token = '',
+    port = 0,
+    oauthManagerFactory,
+    startBackground = true,
+    homeDir = '',
+    pluginRoot = PLUGIN_ROOT,
+    updateChecker = checkForUpdate,
+    updateApplier = downloadAndApplyUpdate,
+  }) {
     this.engine = engine;
     this.token = token;
     this.requestedPort = port;
+    this.homeDir = homeDir;
+    this.pluginRoot = pluginRoot;
+    this.updateChecker = updateChecker;
+    this.updateApplier = updateApplier;
     this.oauthManager = oauthManagerFactory
       ? oauthManagerFactory(engine.configStore)
       : new OAuthFlowManager(engine.configStore);
@@ -74,6 +90,8 @@ export class SidecarApp {
     this._stopped = false;
     this._bgTimer = null;
     this._wakeResolve = null;
+    this._lastUpdateCheck = null;
+    this._updateInProgress = false;
     this.server = null;
     this.port = 0;
   }
@@ -145,6 +163,12 @@ export class SidecarApp {
       } catch {}
     }
 
+    try {
+      this._lastUpdateCheck = await this.updateChecker({
+        currentVersion: getInstalledVersion(this.pluginRoot),
+      });
+    } catch {}
+
     while (!this._stopped) {
       settings = this.engine.configStore.getSettings();
       const baseSec = Math.max(15, Number.parseInt(settings.pollIntervalSec || 300, 10) || 300);
@@ -190,7 +214,18 @@ export class SidecarApp {
         if (req.method === 'GET') {
           if (url.pathname === '/api/status') {
             const refresh = url.searchParams.get('refresh') === '1';
-            this.#sendJson(res, 200, await this.engine.getSnapshot({ refreshRemote: refresh }));
+            const snap = await this.engine.getSnapshot({ refreshRemote: refresh });
+            snap.pluginVersion = getInstalledVersion(this.pluginRoot);
+            snap.updateInfo = this._lastUpdateCheck;
+            this.#sendJson(res, 200, snap);
+            return;
+          }
+          if (url.pathname === '/api/update/status') {
+            this.#sendJson(res, 200, {
+              currentVersion: getInstalledVersion(this.pluginRoot),
+              update: this._lastUpdateCheck,
+              updating: this._updateInProgress,
+            });
             return;
           }
           if (url.pathname === '/api/rclone/remotes') {
@@ -326,6 +361,47 @@ export class SidecarApp {
             return;
           }
 
+          if (url.pathname === '/api/update/check') {
+            const currentVersion = getInstalledVersion(this.pluginRoot);
+            this._lastUpdateCheck = await this.updateChecker({ currentVersion });
+            this.#sendJson(res, 200, { ok: true, update: this._lastUpdateCheck });
+            return;
+          }
+
+          if (url.pathname === '/api/update/apply') {
+            if (this._updateInProgress) {
+              this.#sendJson(res, 409, { error: '正在执行更新，请稍候' });
+              return;
+            }
+            this._updateInProgress = true;
+            try {
+              const currentVersion = getInstalledVersion(this.pluginRoot);
+              let info = this._lastUpdateCheck;
+              if (!info || !info.zipUrl || !info.hasUpdate) {
+                info = await this.updateChecker({ currentVersion });
+                this._lastUpdateCheck = info;
+              }
+              if (!info?.zipUrl) {
+                throw new Error('未获取到更新包下载地址');
+              }
+              const result = await this.updateApplier({
+                zipUrl: info.zipUrl,
+                homeDir: this.homeDir || getHomeDir(),
+              });
+              this._lastUpdateCheck = {
+                ...info,
+                hasUpdate: false,
+                appliedVersion: result.installedVersion,
+                requiresRestart: true,
+              };
+              this.engine.configStore.appendLog(`已原地升级 Plugin Sync 到 v${result.installedVersion}，请重启 Antigravity 桌面端生效`);
+              this.#sendJson(res, 200, { ok: true, result, update: this._lastUpdateCheck });
+            } finally {
+              this._updateInProgress = false;
+            }
+            return;
+          }
+
           this.#sendJson(res, 404, { error: 'not found' });
           return;
         }
@@ -390,7 +466,7 @@ if (isDirectRun) {
   const engine = new SyncEngine({ configStore: store, pluginsDir });
   const token = process.env.ANTIGRAVITY_SIDECAR_UI_TOKEN || '';
 
-  const app = new SidecarApp({ engine, token, port: args.port, startBackground: true });
+  const app = new SidecarApp({ engine, token, port: args.port, startBackground: true, homeDir: home });
   const port = await app.start();
   console.log(`[plugin-sync] sidecar listening on 127.0.0.1:${port}`);
 
