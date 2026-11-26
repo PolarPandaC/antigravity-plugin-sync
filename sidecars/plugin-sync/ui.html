@@ -260,7 +260,7 @@
         <input id="folderNameInput" type="text" placeholder="AntigravityPluginSync" />
       </label>
       <label class="field">
-        <span>后台轮询间隔（秒，最小 15）</span>
+        <span>后台轮询间隔（秒，最小 15，建议 300+）</span>
         <input id="pollIntervalInput" type="number" min="15" max="86400" />
       </label>
       <label class="check">
@@ -547,7 +547,7 @@
         el('rcloneBinaryInput').value = (s.rclone && s.rclone.binary) || 'rclone';
         el('existingPluginPolicySelect').value = s.existingPluginPolicy || 'keep_local';
         el('folderNameInput').value = s.folderName || 'AntigravityPluginSync';
-        el('pollIntervalInput').value = String(s.pollIntervalSec || 60);
+        el('pollIntervalInput').value = String(s.pollIntervalSec || 300);
         el('autoSyncCheck').checked = s.autoSyncOnStartup !== false;
         el('excludeNodeModulesCheck').checked = s.excludeNodeModules !== false;
         updateBackendBoxes();
@@ -653,7 +653,7 @@
           backend: el('backendSelect').value,
           existingPluginPolicy: el('existingPluginPolicySelect').value,
           folderName: el('folderNameInput').value.trim() || 'AntigravityPluginSync',
-          pollIntervalSec: Number(el('pollIntervalInput').value || 60),
+          pollIntervalSec: Number(el('pollIntervalInput').value || 300),
           autoSyncOnStartup: el('autoSyncCheck').checked,
           excludeNodeModules: el('excludeNodeModulesCheck').checked,
           oauth: {

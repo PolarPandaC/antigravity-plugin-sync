@@ -133,22 +133,31 @@ export class SidecarApp {
     await this.#waitOrWake(2000);
     if (this._stopped) return;
 
+    let consecutiveRateLimits = 0;
+    const isRateLimit = (res) =>
+      Boolean(res && !res.ok && /ratelimit|quota exceeded|配额限流|429/i.test(res.error || ''));
+
     let settings = this.engine.configStore.getSettings();
     if (settings.autoSyncOnStartup !== false && settings.backend && settings.backend !== 'none') {
       try {
-        await this.engine.syncNow();
+        const res = await this.engine.syncNow();
+        consecutiveRateLimits = isRateLimit(res) ? 1 : 0;
       } catch {}
     }
 
     while (!this._stopped) {
       settings = this.engine.configStore.getSettings();
-      const intervalSec = Math.max(15, Number.parseInt(settings.pollIntervalSec || 60, 10) || 60);
-      await this.#waitOrWake(intervalSec * 1000);
+      const baseSec = Math.max(15, Number.parseInt(settings.pollIntervalSec || 300, 10) || 300);
+      const waitSec = consecutiveRateLimits > 0
+        ? Math.min(Math.max(baseSec, 300) * (2 ** Math.min(consecutiveRateLimits - 1, 4)), 3600)
+        : baseSec;
+      await this.#waitOrWake(waitSec * 1000);
       if (this._stopped) break;
       settings = this.engine.configStore.getSettings();
       if (settings.backend && settings.backend !== 'none') {
         try {
-          await this.engine.syncNow();
+          const res = await this.engine.syncNow();
+          consecutiveRateLimits = isRateLimit(res) ? consecutiveRateLimits + 1 : 0;
         } catch {}
       }
     }
@@ -293,6 +302,7 @@ export class SidecarApp {
 
           if (url.pathname === '/api/oauth/disconnect') {
             this.engine.configStore.clearTokens();
+            this.engine.configStore.clearDriveIdCache();
             this.#sendJson(res, 200, { ok: true, snapshot: await this.engine.getSnapshot() });
             return;
           }
@@ -310,6 +320,7 @@ export class SidecarApp {
           if (url.pathname === '/api/gdrive/auth/logout') {
             const gdriveBin = String(this.engine.configStore.getSettings().gdrive?.binary || '');
             this.gdriveAuthManager.logout(gdriveBin);
+            this.engine.configStore.clearDriveIdCache();
             this.engine.invalidateAuthCache();
             this.#sendJson(res, 200, { ok: true, snapshot: await this.engine.getSnapshot() });
             return;

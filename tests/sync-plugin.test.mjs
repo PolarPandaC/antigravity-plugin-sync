@@ -657,3 +657,141 @@ test('installer and uninstaller work in temp home and clean stale python files',
     assert.ok(!existsSync(installedDir));
   });
 });
+
+test('GdriveCliBackend caches Drive IDs in ConfigStore and recovers on stale file ID', async () => {
+  await withTempDir(async (tmp) => {
+    const store = new ConfigStore(tmp);
+    assert.equal(store.getSettings().pollIntervalSec, 300);
+
+    store.setDriveIdCache('gdrive:AntigravityPluginSync', { rootFolderId: 'r1', manifestFileId: 'm1' });
+    assert.deepEqual(store.getDriveIdCache('gdrive:AntigravityPluginSync'), {
+      rootFolderId: 'r1',
+      manifestFileId: 'm1',
+    });
+    store.clearDriveIdCache();
+    assert.deepEqual(store.getDriveIdCache('gdrive:AntigravityPluginSync'), {});
+
+    const fakeBin = join(tmp, 'gdrive');
+    writeFileSync(fakeBin, '');
+
+    let manifestId = 'm-initial';
+    let manifestObj = { schemaVersion: 1, plugins: { demo: { version: '1.0' } } };
+    const calls = [];
+
+    const execFn = (_cmd, args) => {
+      calls.push(args);
+      if (args[0] === 'readonly' && args[1] === 'ls') {
+        const parent = args[2];
+        if (parent === 'root') {
+          return Buffer.from(JSON.stringify([{ id: 'root-folder', name: 'AntigravityPluginSync', mimeType: 'application/vnd.google-apps.folder' }]));
+        }
+        if (parent === 'root-folder') {
+          return Buffer.from(JSON.stringify([{ id: manifestId, name: 'manifest.json', mimeType: 'application/json' }]));
+        }
+        return Buffer.from('[]');
+      }
+      if (args[0] === 'readonly' && args[1] === 'download') {
+        const fid = args[2];
+        if (fid !== manifestId) {
+          const err = new Error('404 Not Found');
+          err.stderr = Buffer.from('googleapi: Error 404: File not found');
+          throw err;
+        }
+        writeFileSync(args[args.indexOf('--out') + 1], JSON.stringify(manifestObj));
+        return Buffer.alloc(0);
+      }
+      if (args[0] === 'mutate' && args[1] === 'update') {
+        manifestObj = JSON.parse(readFileSync(args[3], 'utf8'));
+        return Buffer.from(`Updated file (ID: ${args[2]})\n`);
+      }
+      throw new Error(`Unexpected gdrive args: ${args.join(' ')}`);
+    };
+
+    const backend1 = new GdriveCliBackend({
+      configStore: store,
+      folderName: 'AntigravityPluginSync',
+      binary: fakeBin,
+      execFn,
+      retryDelaysMs: [1, 1],
+    });
+    const m1 = await backend1.readManifest();
+    assert.equal(m1.plugins.demo.version, '1.0');
+    assert.equal(store.getDriveIdCache('gdrive:AntigravityPluginSync').manifestFileId, 'm-initial');
+
+    // New backend instance sharing ConfigStore reads & writes manifest with 0 ls calls
+    calls.length = 0;
+    const backend2 = new GdriveCliBackend({
+      configStore: store,
+      folderName: 'AntigravityPluginSync',
+      binary: fakeBin,
+      execFn,
+      retryDelaysMs: [1, 1],
+    });
+    const m2 = await backend2.readManifest();
+    assert.equal(m2.plugins.demo.version, '1.0');
+    assert.equal(calls.filter((c) => c[0] === 'readonly' && c[1] === 'ls').length, 0);
+
+    await backend2.writeManifest({ schemaVersion: 1, plugins: { demo: { version: '2.0' } } });
+    assert.equal(calls.filter((c) => c[0] === 'readonly' && c[1] === 'ls').length, 0);
+
+    // Stale manifestFileId (404) triggers automatic re-lookup and recovery
+    manifestId = 'm-replaced';
+    calls.length = 0;
+    const m3 = await backend2.readManifest();
+    assert.equal(m3.plugins.demo.version, '2.0');
+    assert.equal(store.getDriveIdCache('gdrive:AntigravityPluginSync').manifestFileId, 'm-replaced');
+    assert.ok(calls.some((c) => c[0] === 'readonly' && c[1] === 'ls'));
+  });
+});
+
+test('GdriveCliBackend retries transient EOF/403 rateLimitExceeded and formats exhausted quota errors', async () => {
+  await withTempDir(async (tmp) => {
+    const store = new ConfigStore(tmp);
+    const fakeBin = join(tmp, 'gdrive');
+    writeFileSync(fakeBin, '');
+
+    let attempts = 0;
+    const backendOk = new GdriveCliBackend({
+      configStore: store,
+      folderName: 'AntigravityPluginSync',
+      binary: fakeBin,
+      retryDelaysMs: [1, 1],
+      execFn: (_cmd, args) => {
+        attempts++;
+        if (attempts === 1) {
+          const err = new Error('EOF');
+          err.stderr = Buffer.from('listing files: Get "https://www.googleapis.com/drive/v3/files": EOF');
+          throw err;
+        }
+        if (attempts === 2) {
+          const err = new Error('403');
+          err.stderr = Buffer.from('googleapi: Error 403: Quota exceeded, rateLimitExceeded');
+          throw err;
+        }
+        if (args[0] === 'readonly' && args[1] === 'ls') {
+          return Buffer.from(JSON.stringify([{ id: 'root-id', name: 'AntigravityPluginSync', mimeType: 'application/vnd.google-apps.folder' }]));
+        }
+        throw new Error(`Unexpected gdrive args: ${args.join(' ')}`);
+      },
+    });
+    assert.equal(await backendOk.readManifest(), null);
+    assert.equal(attempts, 4);
+
+    // Exhausted retries on 403 rateLimitExceeded produces friendly message
+    let failAttempts = 0;
+    const backendFail = new GdriveCliBackend({
+      configStore: new ConfigStore(join(tmp, 'data2')),
+      folderName: 'AntigravityPluginSync',
+      binary: fakeBin,
+      retryDelaysMs: [1, 1],
+      execFn: () => {
+        failAttempts++;
+        const err = new Error('403');
+        err.stderr = Buffer.from('googleapi: Error 403: Quota exceeded for quota metric, rateLimitExceeded');
+        throw err;
+      },
+    });
+    await assert.rejects(() => backendFail.readManifest(), /Google Drive API 配额限流 \(403 rateLimitExceeded\)/);
+    assert.equal(failAttempts, 3);
+  });
+});
