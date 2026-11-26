@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -41,6 +41,31 @@ function cleanupStageDir(stageDir) {
   } catch {}
 }
 
+/** Recursively synchronize `srcDir` into `dstDir` in-place without deleting locked dirs first. */
+function syncDirectoryInPlace(srcDir, dstDir) {
+  mkdirSync(dstDir, { recursive: true });
+  const srcEntries = readdirSync(srcDir, { withFileTypes: true });
+  const srcNames = new Set(srcEntries.map((ent) => ent.name));
+
+  for (const ent of srcEntries) {
+    const srcPath = join(srcDir, ent.name);
+    const dstPath = join(dstDir, ent.name);
+    if (ent.isDirectory()) {
+      syncDirectoryInPlace(srcPath, dstPath);
+    } else {
+      copyFileSync(srcPath, dstPath);
+    }
+  }
+
+  for (const ent of readdirSync(dstDir, { withFileTypes: true })) {
+    if (srcNames.has(ent.name)) continue;
+    const dstPath = join(dstDir, ent.name);
+    try {
+      rmSync(dstPath, { recursive: true, force: true });
+    } catch {}
+  }
+}
+
 /** Install plugin-sync into `<homeDir>/.gemini/config/plugins/plugin-sync`. */
 export function installPlugin({ sourceRoot, homeDir, enableSidecar = false }) {
   const pluginsDir = join(homeDir, '.gemini', 'config', 'plugins');
@@ -64,20 +89,16 @@ export function installPlugin({ sourceRoot, homeDir, enableSidecar = false }) {
     }
 
     if (existsSync(targetDir)) {
-      try {
-        rmSync(targetDir, { recursive: true, force: true });
-        renameSync(stageDir, targetDir);
-      } catch {
-        // On Windows, running sidecar holds CWD lock on sidecars/plugin-sync; copy in-place cleanly.
-        cpSync(stageDir, targetDir, { recursive: true, force: true });
-        cleanupStageDir(stageDir);
-      }
+      // On Windows, running sidecar or watchers can lock directories and put rmSync into DELETE_PENDING;
+      // update files in-place directly instead of removing targetDir first.
+      syncDirectoryInPlace(stageDir, targetDir);
+      cleanupStageDir(stageDir);
       cleanStaleFiles(targetDir);
     } else {
       try {
         renameSync(stageDir, targetDir);
       } catch {
-        cpSync(stageDir, targetDir, { recursive: true, force: true });
+        syncDirectoryInPlace(stageDir, targetDir);
         cleanupStageDir(stageDir);
       }
     }
